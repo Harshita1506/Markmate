@@ -15,6 +15,11 @@ venv311/
 
 # Streamlit
 .streamlit/
-
+.streamlit/secrets.toml
 # Logs
 *.log
+venv/
+venv311/
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
