@@ -1,89 +1,101 @@
-import numpy as np
-import face_recognition
-from sklearn.svm import SVC
-import streamlit as st
-
-from src.database.db import get_all_students
+from src.database.config import supabase
+import bcrypt
 
 
-def sanitize_image(image_np):
-    image_np = np.ascontiguousarray(image_np, dtype=np.uint8)
-    if image_np.ndim == 2:
-        image_np = np.stack([image_np] * 3, axis=-1)
-    elif image_np.ndim == 3 and image_np.shape[2] == 4:
-        image_np = image_np[:, :, :3]
-    return image_np
+
+def hash_pass(pwd):
+    return bcrypt.hashpw(pwd.encode(), bcrypt.gensalt()).decode()
+
+def check_pass(pwd, hashed):
+    return bcrypt.checkpw(pwd.encode(), hashed.encode())
 
 
-def get_face_embeddings(image_np):
-    image_np = sanitize_image(image_np)
-    encodings = face_recognition.face_encodings(image_np)
-    return [np.array(e) for e in encodings]
+def check_teacher_exists(username):
+    # Check for unique username, returns false when username is already taken
+    response = supabase.table("teachers").select("username").eq("username", username).execute()
+    return len(response.data) > 0 
 
 
-@st.cache_resource
-def get_trained_model():
-    X = []
-    y = []
 
-    student_db = get_all_students()
+def create_teacher(username, password, name):
 
-    if not student_db:
-        return None
-
-    for student in student_db:
-        embedding = student.get('face_embedding')
-        if embedding:
-            X.append(np.array(embedding))
-            y.append(student.get('student_id'))
-
-    if len(X) == 0:
-        return 0
-
-    clf = SVC(kernel='linear', probability=True, class_weight='balanced')
-
-    try:
-        clf.fit(X, y)
-    except ValueError:
-        pass
-
-    return {'clf': clf, 'X': X, 'y': y}
+    data = { "username" : username, "password": hash_pass(password), "name": name}
+    response = supabase.table("teachers").insert(data).execute()
+    return response.data
 
 
-def train_classifier():
-    st.cache_resource.clear()
-    model_data = get_trained_model()
-    return bool(model_data)
+def teacher_login(username, password):
+    response = supabase.table("teachers").select("*").eq("username", username).execute()
+    if response.data:
+        teacher = response.data[0]
+        if check_pass(password, teacher['password']):
+            return teacher
+    return None
 
 
-def predict_attendance(class_image_np):
-    class_image_np = sanitize_image(class_image_np)
-    encodings = get_face_embeddings(class_image_np)
+def get_all_students():
+    response = supabase.table('students').select("*").execute()
+    return response.data
 
-    detected_student = {}
+def create_student(new_name, face_embedding=None):
+    data = {
+        'name': new_name,
+        'face_embedding': face_embedding
+    }
 
-    model_data = get_trained_model()
+    response = supabase.table('students').insert(data).execute()
+    return response.data
 
-    if not model_data:
-        return detected_student, [], len(encodings)
 
-    clf = model_data['clf']
-    X_train = model_data['X']
-    y_train = model_data['y']
+def create_subject(subject_code, name, section, teacher_id):
+    data = {"subject_code": subject_code, "name": name, "section": section, "teacher_id": teacher_id}
+    response = supabase.table("subjects").insert(data).execute()
+    return response.data
 
-    all_students = sorted(list(set(y_train)))
+def get_teacher_subjects(teacher_id):
+    response = supabase.table('subjects').select("*, subject_students(count), attendance_logs(timestamp)").eq("teacher_id", teacher_id).execute()
+    subjects = response.data
 
-    for encoding in encodings:
-        if len(all_students) >= 2:
-            predicted_id = int(clf.predict([encoding])[0])
-        else:
-            predicted_id = int(all_students[0])
 
-        student_embedding = X_train[y_train.index(predicted_id)]
-        best_match_score = np.linalg.norm(student_embedding - encoding)
-        resemblance_threshold = 0.6
+    for sub in subjects:
+        sub['total_students'] = sub.get("subject_students", [{}])[0].get('count', 0) if sub.get('subject_students') else 0
+        attendance = sub.get('attendance_logs', [])
+        unique_sessions = len(set(log['timestamp'] for log in attendance))
+        sub['total_classes'] = unique_sessions
 
-        if best_match_score <= resemblance_threshold:
-            detected_student[predicted_id] = True
 
-    return detected_student, all_students, len(encodings)
+        sub.pop('subject_student', None)
+        sub.pop('attendance_logs', None)
+
+    return subjects
+
+
+def  enroll_student_to_subject(student_id, subject_id):
+    data = {'student_id': student_id, "subject_id": subject_id}
+    response= supabase.table('subject_students').insert(data).execute()
+    return response.data
+
+
+def  unenroll_student_to_subject(student_id, subject_id):
+    response= supabase.table('subject_students').delete().eq('student_id', student_id).eq('subject_id', subject_id).execute()
+    return response.data
+
+
+
+def get_student_subjects(student_id):
+    response = supabase.table('subject_students').select('*, subjects(*)').eq('student_id', student_id).execute()
+    return response.data
+
+
+def get_student_attendance(student_id):
+    response = supabase.table('attendance_logs').select('*, subjects(*)').eq('student_id', student_id).execute()
+    return response.data
+
+
+def create_attendance(logs):
+    response = supabase.table('attendance_logs').insert(logs).execute()
+    return response.data
+
+def get_attendance_for_teacher(teacher_id):
+    response = supabase.table('attendance_logs').select("*, subjects!inner(*)").eq('subjects.teacher_id', teacher_id).execute()
+    return response.data
